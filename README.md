@@ -126,7 +126,7 @@ Corelock/
 ### Building with CMake
 ```cmd
 # 1. Clone repository
-git clone https://github.com/yourusername/Corelock.git
+git clone https://github.com/phaticusthiccy/Corelock.git
 cd Corelock
 
 # 2. Configure with CMake
