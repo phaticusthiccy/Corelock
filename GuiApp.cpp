@@ -446,16 +446,19 @@ void GuiApp::RenderUI() {
 
     // Two-Column Layout: Left (Controls), Right (Visualizer & Live Telemetry)
     float contentWidth = ImGui::GetContentRegionAvail().x;
-    float leftColWidth = contentWidth * 0.42f;
+    float leftColWidth = contentWidth * 0.44f;
     float rightColWidth = contentWidth - leftColWidth - ImGui::GetStyle().ItemSpacing.x;
 
-    ImGui::BeginChild("LeftControlColumn", ImVec2(leftColWidth, 430.0f), true);
+    float availableHeight = ImGui::GetContentRegionAvail().y;
+    float topPanelsHeight = (std::max)(480.0f, availableHeight - 210.0f);
+
+    ImGui::BeginChild("LeftControlColumn", ImVec2(leftColWidth, topPanelsHeight), true);
     RenderControlPanel();
     ImGui::EndChild();
 
     ImGui::SameLine();
 
-    ImGui::BeginChild("RightVisualizationColumn", ImVec2(rightColWidth, 430.0f), true);
+    ImGui::BeginChild("RightVisualizationColumn", ImVec2(rightColWidth, topPanelsHeight), true);
     RenderCoreVisualizer();
     ImGui::Spacing();
     RenderSnapshotCard();
@@ -483,20 +486,43 @@ void GuiApp::RenderHeader() {
     ImGui::Text("GAME PRIORITY & THREAD ISOLATION ENGINE");
     ImGui::PopFont();
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 250.0f);
+    // Right-aligned header buttons & status badge
+    float headerRightWidth = 360.0f;
+    ImGui::SameLine(ImGui::GetWindowWidth() - headerRightWidth - 16.0f);
+
+    // Quick Start / Stop Action in Header
+    if (!isRunning) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.65f, 0.35f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 0.80f, 0.45f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.00f, 0.50f, 0.25f, 1.00f));
+        if (ImGui::Button("START", ImVec2(80.0f, 26.0f))) {
+            StartMonitoring();
+        }
+        ImGui::PopStyleColor(3);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.15f, 0.25f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.25f, 0.35f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.60f, 0.10f, 0.20f, 1.00f));
+        if (ImGui::Button("STOP", ImVec2(80.0f, 26.0f))) {
+            StopMonitoring();
+        }
+        ImGui::PopStyleColor(3);
+    }
+
+    ImGui::SameLine();
 
     // Status Badge Pill
     if (isOptimized) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.55f, 0.25f, 0.90f));
-        ImGui::Button("[ OPTIMIZED // ACTIVE ]", ImVec2(230.0f, 26.0f));
+        ImGui::Button("[ OPTIMIZED // ACTIVE ]", ImVec2(240.0f, 26.0f));
         ImGui::PopStyleColor();
     } else if (isRunning) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.40f, 0.60f, 0.90f));
-        ImGui::Button("[ SCANNING FOR GAME... ]", ImVec2(230.0f, 26.0f));
+        ImGui::Button("[ SCANNING FOR GAME... ]", ImVec2(240.0f, 26.0f));
         ImGui::PopStyleColor();
     } else {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.23f, 0.30f, 0.80f));
-        ImGui::Button("[ MONITOR STOPPED ]", ImVec2(230.0f, 26.0f));
+        ImGui::Button("[ MONITOR STOPPED ]", ImVec2(240.0f, 26.0f));
         ImGui::PopStyleColor();
     }
 }
@@ -582,25 +608,60 @@ void GuiApp::RenderControlPanel() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Start / Stop Master Toggle Button
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextColored(ImVec4(0.00f, 0.85f, 0.95f, 1.00f), "OPTIMIZATION CONTROLS");
+    ImGui::Spacing();
+
+    // Start / Stop Master Action Buttons (Dual Side-by-Side)
+    float btnWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+    // --- START OPTIMIZATION BUTTON ---
     if (!isRunning) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.65f, 0.35f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 0.80f, 0.45f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.00f, 0.50f, 0.25f, 1.00f));
 
-        if (ImGui::Button("START OPTIMIZER", ImVec2(-1.0f, 40.0f))) {
+        if (ImGui::Button("START OPTIMIZATION", ImVec2(btnWidth, 42.0f))) {
             StartMonitoring();
         }
         ImGui::PopStyleColor(3);
     } else {
+        // Dimmed appearance when already active
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.20f, 0.16f, 0.60f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.60f, 0.45f, 0.70f));
+        ImGui::Button("RUNNING...", ImVec2(btnWidth, 42.0f));
+        ImGui::PopStyleColor(2);
+    }
+
+    ImGui::SameLine();
+
+    // --- STOP OPTIMIZATION BUTTON ---
+    if (isRunning) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.15f, 0.25f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.25f, 0.35f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.60f, 0.10f, 0.20f, 1.00f));
 
-        if (ImGui::Button("STOP OPTIMIZER", ImVec2(-1.0f, 40.0f))) {
+        if (ImGui::Button("STOP OPTIMIZATION", ImVec2(btnWidth, 42.0f))) {
             StopMonitoring();
         }
         ImGui::PopStyleColor(3);
+    } else {
+        // Dimmed appearance when stopped
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.14f, 0.16f, 0.60f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.40f, 0.45f, 0.70f));
+        ImGui::Button("STOPPED", ImVec2(btnWidth, 42.0f));
+        ImGui::PopStyleColor(2);
+    }
+
+    ImGui::Spacing();
+    // Quick Re-apply / Refresh Trigger
+    if (isRunning) {
+        if (ImGui::Button("REFRESH / RE-SCAN PROCESS NOW", ImVec2(-1.0f, 26.0f))) {
+            AppendLog(LogLevel::Info, "Immediate process re-scan requested by user.");
+        }
     }
 }
 
