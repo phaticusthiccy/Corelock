@@ -304,6 +304,16 @@ public:
      */
     static std::string AffinityMaskToString(DWORD_PTR mask);
 
+    /**
+     * @brief Utility: Converts a UTF-16 wide string to a UTF-8 narrow string cleanly without data loss warnings.
+     */
+    static std::string WideToNarrow(std::wstring_view wstr);
+
+    /**
+     * @brief Utility: Converts a UTF-8 narrow string to a UTF-16 wide string.
+     */
+    static std::wstring NarrowToWide(std::string_view str);
+
 private:
     void WorkerThread(std::stop_token stopToken);
 

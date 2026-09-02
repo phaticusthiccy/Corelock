@@ -306,7 +306,7 @@ void GuiApp::RefreshProcessList() {
 
 int GuiApp::Run(const std::wstring& initialTarget) {
     if (!initialTarget.empty()) {
-        std::string narrow(initialTarget.begin(), initialTarget.end());
+        std::string narrow = GameOptimizer::WideToNarrow(initialTarget);
         ::strncpy_s(targetProcessBuf_, narrow.c_str(), sizeof(targetProcessBuf_) - 1);
         config_.targetProcessName = initialTarget;
     }
@@ -427,7 +427,6 @@ void GuiApp::RenderUI() {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
-    ImGui::SetNextWindowViewport(viewport->ID);
 
     ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoTitleBar |
                                    ImGuiWindowFlags_NoCollapse |
@@ -526,7 +525,7 @@ void GuiApp::RenderControlPanel() {
 
         ImGui::BeginChild("ProcessListScroll", ImVec2(320.0f, 200.0f));
         for (const auto& proc : runningProcesses_) {
-            std::string narrowName(proc.exeName.begin(), proc.exeName.end());
+            std::string narrowName = GameOptimizer::WideToNarrow(proc.exeName);
             if (processFilterBuf_[0] != '\0') {
                 std::string filterLower = processFilterBuf_;
                 std::string nameLower = narrowName;
@@ -751,7 +750,7 @@ void GuiApp::RenderLogConsole() {
 
 void GuiApp::StartMonitoring() {
     std::string targetStr = targetProcessBuf_;
-    config_.targetProcessName = std::wstring(targetStr.begin(), targetStr.end());
+    config_.targetProcessName = GameOptimizer::NarrowToWide(targetStr);
 
     switch (selectedAffinityPolicyIndex_) {
         case 0: config_.affinityPolicy = AffinityPolicy::AllCores; break;

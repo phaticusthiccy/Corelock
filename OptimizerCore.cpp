@@ -86,7 +86,7 @@ void GameOptimizer::WorkerThread(std::stop_token stopToken) {
         ::SetEvent(stopEvent.Get());
     });
 
-    std::string targetNameNarrow(config_.targetProcessName.begin(), config_.targetProcessName.end());
+    std::string targetNameNarrow = WideToNarrow(config_.targetProcessName);
     Log(LogLevel::Info, "Monitoring process lifecycle for: '" + targetNameNarrow + "'");
 
     while (!stopToken.stop_requested()) {
@@ -359,7 +359,7 @@ void GameOptimizer::RestoreProcessState(HANDLE hProcess, ProcessStateSnapshot& s
 // Affinity Mask Computation & Topology Awareness
 // ============================================================================
 
-DWORD_PTR GameOptimizer::ComputeTargetAffinity(DWORD_PTR currentAffinity, DWORD_PTR systemAffinity) {
+DWORD_PTR GameOptimizer::ComputeTargetAffinity([[maybe_unused]] DWORD_PTR currentAffinity, DWORD_PTR systemAffinity) {
     switch (config_.affinityPolicy) {
         case AffinityPolicy::AllCores:
             return systemAffinity;
@@ -544,6 +544,32 @@ void GameOptimizer::Log(LogLevel level, std::string_view message) const {
     } else {
         std::cout << prefix.str() << message << std::endl;
     }
+}
+
+std::string GameOptimizer::WideToNarrow(std::wstring_view wstr) {
+    if (wstr.empty()) {
+        return {};
+    }
+    int size = ::WideCharToMultiByte(CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) {
+        return {};
+    }
+    std::string result(size, 0);
+    ::WideCharToMultiByte(CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()), result.data(), size, nullptr, nullptr);
+    return result;
+}
+
+std::wstring GameOptimizer::NarrowToWide(std::string_view str) {
+    if (str.empty()) {
+        return {};
+    }
+    int size = ::MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), nullptr, 0);
+    if (size <= 0) {
+        return {};
+    }
+    std::wstring result(size, 0);
+    ::MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), result.data(), size);
+    return result;
 }
 
 } // namespace Corelock

@@ -68,7 +68,7 @@ static int RunCliMode(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg != "--cli" && arg != "-c") {
-            targetProcess = std::wstring(arg.begin(), arg.end());
+            targetProcess = Corelock::GameOptimizer::NarrowToWide(arg);
             break;
         }
     }
@@ -118,7 +118,7 @@ static int RunCliMode(int argc, char* argv[]) {
         std::cerr << "\033[1;31m[WARNING] Failed to register Win32 ConsoleCtrlHandler.\033[0m\n";
     }
 
-    std::string targetNarrow(targetProcess.begin(), targetProcess.end());
+    std::string targetNarrow = Corelock::GameOptimizer::WideToNarrow(targetProcess);
     std::cout << "\033[1mConfigured Target:\033[0m  " << targetNarrow << "\n"
               << "\033[1mPriority Policy:\033[0m    HIGH_PRIORITY_CLASS\n"
               << "\033[1mAffinity Policy:\033[0m    Isolate Logical CPU 0 (Reserve CPU 0 for DPC/Hardware Interrupts)\n"
@@ -182,7 +182,7 @@ int main(int argc, char* argv[]) {
                       << "  GameOptimizer.exe --cli [game.exe]  (Runs in Headless Terminal / CLI mode)\n";
             return 0;
         } else if (!arg.starts_with("-")) {
-            initialTarget = std::wstring(arg.begin(), arg.end());
+            initialTarget = Corelock::GameOptimizer::NarrowToWide(arg);
         }
     }
 
