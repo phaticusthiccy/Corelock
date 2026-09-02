@@ -19,26 +19,26 @@
 
 ```mermaid
 flowchart TD
-    subgraph Windows_Kernel [Windows Kernel & Hardware]
-        IRQ[Hardware IRQs & Network DPCs] -->|Queued by Default| CPU0[Logical CPU 0]
-        PWR[Windows Power Subsystem]
-        MMCSS_SVC[Multimedia Class Scheduler Service]
+    subgraph Windows_Kernel ["Windows Kernel & Hardware"]
+        IRQ["Hardware IRQs & Network DPCs"] -->|Queued by Default| CPU0["Logical CPU 0"]
+        PWR["Windows Power Subsystem"]
+        MMCSS_SVC["Multimedia Class Scheduler Service"]
     end
 
-    subgraph Corelock_App [Corelock Optimizer Engine (Out-of-Process)]
-        Tracker[Async Process Lifecycle Tracker]
-        StateSnap[Fault-Tolerant State Machine]
-        GUI[DirectX 11 & ImGui Dashboard]
+    subgraph Corelock_App ["Corelock Optimizer Engine (Out-of-Process)"]
+        Tracker["Async Process Lifecycle Tracker"]
+        StateSnap["Fault-Tolerant State Machine"]
+        GUI["DirectX 11 & ImGui Dashboard"]
     end
 
-    subgraph Target_Game [Target Game Process (e.g. CS2 / Valorant)]
-        GameThreads[Game Render & Physics Threads]
+    subgraph Target_Game ["Target Game Process (e.g. CS2 / Valorant)"]
+        GameThreads["Game Render & Physics Threads"]
     end
 
     Tracker -->|OpenProcess with Least Privilege| Target_Game
     StateSnap -->|1. Capture Baseline Snapshot| Target_Game
     Corelock_App -->|2. Offload away from CPU 0| GameThreads
-    GameThreads -->|Assigned Dedicated Execution| CPU_Rest[Logical Cores 1 .. N-1]
+    GameThreads -->|Assigned Dedicated Execution| CPU_Rest["Logical Cores 1 .. N-1"]
     Corelock_App -->|3. Elevate Priority| Target_Game
     Corelock_App -->|4. Activate GUID_MIN_POWER_SAVINGS| PWR
     Corelock_App -->|5. Register MMCSS 'Games' Profile| MMCSS_SVC
