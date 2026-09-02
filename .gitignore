@@ -1,0 +1,68 @@
+# ============================================================================
+# Git Ignore - Corelock Game Priority & Thread Isolation Optimizer
+# ============================================================================
+
+# Build Directories
+build/
+build*/
+out/
+bin/
+obj/
+x64/
+x86/
+ARM64/
+
+# Visual Studio & MSVC Artifacts
+.vs/
+*.sln.docstates
+*.suo
+*.user
+*.userosscache
+*.sln.ide
+*.vcxproj.user
+*.vcxproj.filters
+*.VC.db
+*.VC.opendb
+*.opendb
+*.db
+
+# Intermediate & Binary Output
+*.obj
+*.o
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.lastbuildstate
+*.log
+
+# CMake Generated Files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.ninja
+.ninja_*
+compile_commands.json
+install_manifest.txt
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_CPack_Packages/
+
+# IDE Configuration
+.idea/
+.vscode/
+*.swp
+*~
+
+# Windows System Files
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
