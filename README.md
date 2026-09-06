@@ -9,6 +9,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/phaticusthiccy/Corelock/releases/download/latest/Corelock.exe">
+    <img src="https://img.shields.io/badge/Download-Corelock.exe%20(Latest%20Release)-00E676?style=for-the-badge&logo=windows&logoColor=white" alt="Download Corelock" />
+  </a>
+</p>
+
+<p align="center">
   <b>A low-level, modular Windows systems performance framework that optimizes CPU core affinity, thread scheduling priority, and dynamic power states for target games.</b><br>
   Operates completely <b>out-of-process</b> with <b>zero risk of triggering anti-cheat systems</b> (BattlEye, EasyAntiCheat, Vanguard, Ricochet, VAC).
 </p>
