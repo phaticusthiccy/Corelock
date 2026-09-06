@@ -30,19 +30,20 @@ jobs:
       - name: Verify Binary Output
         shell: pwsh
         run: |
-          if (Test-Path "build/Release/GameOptimizer.exe") {
-            Write-Host "Binary built successfully at build/Release/GameOptimizer.exe"
-          } elseif (Test-Path "build/GameOptimizer.exe") {
-            Write-Host "Binary built successfully at build/GameOptimizer.exe"
+          if (Test-Path "build/Release/Corelock.exe") {
+            Write-Host "Binary built successfully at build/Release/Corelock.exe"
+          } elseif (Test-Path "build/Corelock.exe") {
+            Write-Host "Binary built successfully at build/Corelock.exe"
           } else {
-            throw "GameOptimizer.exe was not found in expected build outputs!"
+            throw "Corelock.exe was not found in expected build outputs!"
           }
 
       - name: Upload Release Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Corelock-GameOptimizer-x64
+          name: Corelock-x64
           path: |
-            build/Release/GameOptimizer.exe
-            build/GameOptimizer.exe
+            build/Release/Corelock.exe
+            build/Corelock.exe
           if-no-files-found: error
+

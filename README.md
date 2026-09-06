@@ -139,32 +139,32 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 # 3. Build executable
 cmake --build build --config Release
 ```
-The compiled executable will be located in `build/Release/GameOptimizer.exe`.
+The compiled executable will be located in `build/Release/Corelock.exe`.
 
 ---
 
 ## 🎮 Launch Options
 
 ### 1. Launch DirectX 11 GUI (Default)
-Double-click `GameOptimizer.exe` in Windows Explorer or run:
+Double-click `Corelock.exe` in Windows Explorer or run:
 ```cmd
-.\GameOptimizer.exe
+.\Corelock.exe
 ```
 
 Pre-load target game:
 ```cmd
-.\GameOptimizer.exe cs2.exe
+.\Corelock.exe cs2.exe
 ```
 
 ### 2. Headless CLI Mode (Automation / Low-Spec)
 Run with the `--cli` flag:
 ```cmd
-.\GameOptimizer.exe --cli cs2.exe
+.\Corelock.exe --cli cs2.exe
 ```
 
 Test immediately with any running desktop app:
 ```cmd
-.\GameOptimizer.exe --cli notepad.exe
+.\Corelock.exe --cli notepad.exe
 ```
 
 ---

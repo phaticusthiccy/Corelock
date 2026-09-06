@@ -10,6 +10,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
+#include "resource.h"
 
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -328,6 +329,9 @@ int GuiApp::Run(const std::wstring& initialTarget) {
     // Initialize High-DPI Awareness
     ::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
+    HINSTANCE hInst = ::GetModuleHandleW(nullptr);
+    HICON hIcon = ::LoadIconW(hInst, MAKEINTRESOURCEW(IDI_CORELOCK_ICON));
+
     // Register Win32 Window Class
     wc_ = {
         sizeof(wc_),
@@ -335,13 +339,13 @@ int GuiApp::Run(const std::wstring& initialTarget) {
         WndProc,
         0L,
         0L,
-        ::GetModuleHandle(nullptr),
-        nullptr,
+        hInst,
+        hIcon,
         nullptr,
         nullptr,
         nullptr,
         L"CorelockOptimizerGuiClass",
-        nullptr
+        hIcon
     };
     ::RegisterClassExW(&wc_);
 
@@ -362,6 +366,11 @@ int GuiApp::Run(const std::wstring& initialTarget) {
 
     if (hWnd_ == nullptr) {
         return 1;
+    }
+
+    if (hIcon != nullptr) {
+        ::SendMessageW(hWnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
+        ::SendMessageW(hWnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
     }
 
     ::SetWindowLongPtr(hWnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));

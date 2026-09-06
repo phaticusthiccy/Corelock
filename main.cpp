@@ -205,9 +205,9 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Corelock: Game Priority & Thread Isolation Optimizer\n"
                       << "Usage:\n"
-                      << "  GameOptimizer.exe                   (Launches DirectX 11 ImGui Dashboard)\n"
-                      << "  GameOptimizer.exe cs2.exe           (Launches GUI with initial target 'cs2.exe')\n"
-                      << "  GameOptimizer.exe --cli [game.exe]  (Runs in Headless Terminal / CLI mode)\n";
+                      << "  Corelock.exe                   (Launches DirectX 11 ImGui Dashboard)\n"
+                      << "  Corelock.exe cs2.exe           (Launches GUI with initial target 'cs2.exe')\n"
+                      << "  Corelock.exe --cli [game.exe]  (Runs in Headless Terminal / CLI mode)\n";
             return 0;
         } else if (!arg.starts_with("-")) {
             initialTarget = Corelock::GameOptimizer::NarrowToWide(arg);
