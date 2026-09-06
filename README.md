@@ -52,16 +52,20 @@ flowchart TD
 
 Corelock includes a desktop dashboard crafted with a **Cyberpunk / Titanium Gamer Aesthetic**:
 
-- **Hardware CPU Topology Visualizer**: An interactive grid displaying all system logical cores (C0, C1, C2, ...). Highlights **Core 0** in radiant amber (`ROLE: OS DPC & Hardware Interrupts Only`) when isolated, and active game simulation cores in neon emerald.
-- **One-Click Process Scanner**: Live snapshot enumeration (`CreateToolhelp32Snapshot`) with instant text filtering to pick running games without typing.
+- **Hardware CPU Topology Visualizer**: An interactive, clickable grid displaying all system logical cores (C0, C1, C2, ...). Highlights **Core 0** in radiant amber (`ROLE: OS DPC & Hardware Interrupts Only`) when isolated, and active game simulation cores in neon emerald. Click any tile to customize core assignment!
+- **One-Click Process Scanner & Executable File Browser**: Live snapshot enumeration (`CreateToolhelp32Snapshot`) with instant text filtering plus native Windows file browser dialog (`Browse (.exe)...`).
 - **Dynamic Optimization Controls**:
   - `Isolate Logical CPU 0`: Reserve CPU 0 for OS DPCs, audio buffers, and network card interrupts.
   - `Isolate Physical Core 0`: SMT/HyperThreading-aware detection via `GetLogicalProcessorInformationEx`.
+  - `Isolate E-Cores (Intel P-Cores Only)`: Automatic hybrid processor topology detection to restrict gaming to Performance Cores.
+  - `Custom Affinity Grid Map`: Click individual core tiles to compose arbitrary core affinity masks with one-click presets (All Cores, Isolate C0, P-Cores, Invert).
+  - `1ms High-Resolution Scheduler Timer`: Out-of-process `timeBeginPeriod(1)` to minimize Windows thread scheduling jitter.
   - `HIGH_PRIORITY_CLASS`: Boost Windows thread dispatching without realtime locks.
   - `Dynamic Power Scheme`: Automatically engages High Performance (`GUID_MIN_POWER_SAVINGS`) during gameplay and reverts upon exit.
   - `MMCSS Integration`: Registers with Multimedia Class Scheduler Service (`L"Games"` profile).
-- **Diagnostics Event Console**: Live scrollable event feed capturing timestamps, error codes, and state transitions.
-- **Active Telemetry Card**: Real-time inspection of active PIDs, affinity masks, power GUIDs, and anti-cheat compliance.
+  - `Persistent Configuration`: Automatically saves and reloads user target games and policies in `corelock.ini`.
+- **Diagnostics Event Console**: Live scrollable event feed capturing timestamps, error codes, and state transitions with one-click log clearing and auto-scroll toggle.
+- **Live Real-Time Telemetry Hub**: Real-time inspection of target game CPU % utilization, memory working set (RAM in MB), active thread count, session duration, PID, power GUIDs, and anti-cheat compliance.
 
 ---
 

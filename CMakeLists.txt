@@ -47,4 +47,6 @@ target_link_libraries(GameOptimizer PRIVATE
     dwmapi.lib
     Powrprof.lib
     Avrt.lib
+    winmm.lib
+    comdlg32.lib
 )

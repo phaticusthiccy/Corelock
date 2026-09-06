@@ -7,6 +7,7 @@
 #include <csignal>
 #include <condition_variable>
 #include <mutex>
+#include <conio.h>
 
 // Global pointer for Win32 Console Control Handler (Ctrl+C / Break)
 static Corelock::GameOptimizer* g_optimizerInstance = nullptr;
@@ -80,6 +81,7 @@ static int RunCliMode(int argc, char* argv[]) {
     config.affinityPolicy = Corelock::AffinityPolicy::IsolateLogicalCpu0; // Isolate CPU 0 for OS DPCs/IRQs
     config.enableDynamicPowerPlan = true;            // Switch to High Performance plan
     config.enableMmcss = true;                       // Enable Multimedia Class Scheduler
+    config.enableHighResolutionTimer = true;         // 1ms high-resolution kernel scheduler timer
     config.pollInterval = std::chrono::milliseconds(800);
 
     // Custom ANSI-colored console logger
@@ -123,32 +125,58 @@ static int RunCliMode(int argc, char* argv[]) {
               << "\033[1mPriority Policy:\033[0m    HIGH_PRIORITY_CLASS\n"
               << "\033[1mAffinity Policy:\033[0m    Isolate Logical CPU 0 (Reserve CPU 0 for DPC/Hardware Interrupts)\n"
               << "\033[1mPower Plan:\033[0m         Dynamic High Performance (GUID_MIN_POWER_SAVINGS)\n"
+              << "\033[1mKernel Timer:\033[0m       1ms High-Resolution (timeBeginPeriod)\n"
               << "\033[1mMMCSS:\033[0m              Enabled ('Games' Task Profile)\n"
               << "\033[1mSafety Model:\033[0m       100% Out-of-Process, 0 Anti-Cheat Trigger Risk\n"
               << "----------------------------------------------------------------------\n"
-              << "Press \033[1;33mCtrl+C\033[0m or type '\033[1;33mq\033[0m' then Enter to quit safely.\n\n";
+              << "Press \033[1;33mCtrl+C\033[0m or type '\033[1;33mq\033[0m' to quit safely.\n\n";
 
     if (!optimizer.Start()) {
         std::cerr << "\033[1;31mFailed to start optimizer.\033[0m\n";
         return 1;
     }
 
+    // Non-blocking keyboard input watcher: avoids deadlock/hang on Ctrl+C shutdown
     std::jthread inputWatcher([](std::stop_token stopToken) {
-        std::string line;
+        std::string inputLine;
         while (!stopToken.stop_requested()) {
-            if (std::cin >> line) {
-                if (line == "q" || line == "quit" || line == "exit") {
-                    std::cout << "\n[USER] Exit command received.\n";
-                    if (g_optimizerInstance != nullptr) {
-                        g_optimizerInstance->Stop();
+            if (_kbhit()) {
+                int ch = _getch();
+                if (ch == '\r' || ch == '\n') {
+                    if (inputLine == "q" || inputLine == "quit" || inputLine == "exit") {
+                        std::cout << "\n[USER] Exit command received.\n";
+                        if (g_optimizerInstance != nullptr) {
+                            g_optimizerInstance->Stop();
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(g_shutdownMutex);
+                            g_shutdownRequested = true;
+                        }
+                        g_shutdownCv.notify_all();
+                        break;
                     }
-                    {
-                        std::lock_guard<std::mutex> lock(g_shutdownMutex);
-                        g_shutdownRequested = true;
+                    inputLine.clear();
+                } else if (ch == '\b') {
+                    if (!inputLine.empty()) {
+                        inputLine.pop_back();
                     }
-                    g_shutdownCv.notify_all();
-                    break;
+                } else if (ch >= 32 && ch <= 126) {
+                    inputLine.push_back(static_cast<char>(ch));
+                    if (inputLine == "q") {
+                        std::cout << "\n[USER] Exit shortcut 'q' pressed.\n";
+                        if (g_optimizerInstance != nullptr) {
+                            g_optimizerInstance->Stop();
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(g_shutdownMutex);
+                            g_shutdownRequested = true;
+                        }
+                        g_shutdownCv.notify_all();
+                        break;
+                    }
                 }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
     });

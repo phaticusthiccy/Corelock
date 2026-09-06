@@ -30,6 +30,11 @@ bool GameOptimizer::Start() {
         return false;
     }
 
+    scanTriggerEvent_.Reset(::CreateEventW(nullptr, FALSE, FALSE, nullptr));
+    if (!scanTriggerEvent_.IsValid()) {
+        Log(LogLevel::Warning, "Failed to create Win32 scan trigger event.");
+    }
+
     isRunning_.store(true);
     workerThread_ = std::jthread([this](std::stop_token token) {
         WorkerThread(token);
@@ -46,13 +51,25 @@ void GameOptimizer::Stop() {
 
     Log(LogLevel::Info, "Stopping optimizer background monitor...");
 
+    if (scanTriggerEvent_.IsValid()) {
+        ::SetEvent(scanTriggerEvent_.Get());
+    }
+
     if (workerThread_.joinable()) {
         workerThread_.request_stop();
         workerThread_.join();
     }
 
+    scanTriggerEvent_.Reset();
     isRunning_.store(false);
     Log(LogLevel::Info, "Optimizer stopped.");
+}
+
+void GameOptimizer::TriggerImmediateScan() {
+    if (scanTriggerEvent_.IsValid()) {
+        ::SetEvent(scanTriggerEvent_.Get());
+        Log(LogLevel::Info, "Immediate process scan triggered.");
+    }
 }
 
 bool GameOptimizer::IsRunning() const noexcept {
@@ -93,12 +110,15 @@ void GameOptimizer::WorkerThread(std::stop_token stopToken) {
         auto maybePid = FindTargetProcessId(config_.targetProcessName);
 
         if (!maybePid.has_value()) {
-            // Target not running: sleep for pollInterval via waitable handle with 0% CPU consumption
-            DWORD waitResult = ::WaitForSingleObject(stopEvent.Get(), static_cast<DWORD>(config_.pollInterval.count()));
+            // Target not running: wait for pollInterval OR manual scanTriggerEvent with 0% CPU consumption
+            HANDLE waitHandles[2] = { stopEvent.Get(), scanTriggerEvent_.Get() };
+            DWORD waitCount = scanTriggerEvent_.IsValid() ? 2 : 1;
+            DWORD waitResult = ::WaitForMultipleObjects(waitCount, waitHandles, FALSE, static_cast<DWORD>(config_.pollInterval.count()));
             if (waitResult == WAIT_OBJECT_0) {
                 // Stop requested during sleep
                 break;
             }
+            // If WAIT_OBJECT_0 + 1 (trigger event) or WAIT_TIMEOUT, loop to check for process
             continue;
         }
 
@@ -107,7 +127,7 @@ void GameOptimizer::WorkerThread(std::stop_token stopToken) {
 
         // Acquire process handle with minimum required access rights
         // PROCESS_SET_INFORMATION: SetPriorityClass, SetProcessAffinityMask
-        // PROCESS_QUERY_LIMITED_INFORMATION: GetPriorityClass, GetProcessAffinityMask
+        // PROCESS_QUERY_LIMITED_INFORMATION: GetPriorityClass, GetProcessAffinityMask, GetProcessTimes
         // SYNCHRONIZE: WaitForSingleObject / WaitForMultipleObjects
         DWORD desiredAccess = PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
         UniqueHandle hProcess(::OpenProcess(desiredAccess, FALSE, pid));
@@ -119,7 +139,9 @@ void GameOptimizer::WorkerThread(std::stop_token stopToken) {
                                  " (Elevation / Administrator rights may be required if the game is running as Admin).");
 
             // Wait before retrying to prevent busy-looping if permissions fail
-            DWORD waitResult = ::WaitForSingleObject(stopEvent.Get(), static_cast<DWORD>(config_.pollInterval.count()));
+            HANDLE waitHandles[2] = { stopEvent.Get(), scanTriggerEvent_.Get() };
+            DWORD waitCount = scanTriggerEvent_.IsValid() ? 2 : 1;
+            DWORD waitResult = ::WaitForMultipleObjects(waitCount, waitHandles, FALSE, static_cast<DWORD>(config_.pollInterval.count()));
             if (waitResult == WAIT_OBJECT_0) {
                 break;
             }
@@ -138,38 +160,57 @@ void GameOptimizer::WorkerThread(std::stop_token stopToken) {
             isOptimized_.store(true);
             Log(LogLevel::Success, "Target process successfully optimized! Entering zero-CPU monitoring state.");
 
-            // Wait on both the stop event AND the process exit handle simultaneously.
-            // 0% CPU consumption while the game runs. Sub-millisecond reaction when the game exits or stop is requested.
-            HANDLE waitHandles[2] = { stopEvent.Get(), hProcess.Get() };
-            DWORD waitResult = ::WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
+            // Wait on stop event, process exit, AND manual re-scan trigger
+            HANDLE waitHandles[3] = { stopEvent.Get(), hProcess.Get(), scanTriggerEvent_.Get() };
+            DWORD waitCount = scanTriggerEvent_.IsValid() ? 3 : 2;
 
-            if (waitResult == WAIT_OBJECT_0) {
-                // Stop requested while game is still actively running
-                Log(LogLevel::Info, "Optimizer shutdown requested while game is still running. Reverting states...");
-                RestoreProcessState(hProcess.Get(), snapshot, /*processIsAlive=*/true);
-                {
-                    std::lock_guard<std::mutex> lock(stateMutex_);
-                    activeSnapshot_.reset();
+            while (!stopToken.stop_requested()) {
+                DWORD waitResult = ::WaitForMultipleObjects(waitCount, waitHandles, FALSE, INFINITE);
+
+                if (waitResult == WAIT_OBJECT_0) {
+                    // Stop requested while game is still actively running
+                    Log(LogLevel::Info, "Optimizer shutdown requested while game is still running. Reverting states...");
+                    RestoreProcessState(hProcess.Get(), snapshot, /*processIsAlive=*/true);
+                    {
+                        std::lock_guard<std::mutex> lock(stateMutex_);
+                        activeSnapshot_.reset();
+                    }
+                    isOptimized_.store(false);
+                    return;
+                } else if (waitResult == WAIT_OBJECT_0 + 1) {
+                    // Target process terminated
+                    Log(LogLevel::Info, "Target process (PID: " + std::to_string(pid) + ") terminated. Executing fault-tolerant restoration...");
+                    RestoreProcessState(hProcess.Get(), snapshot, /*processIsAlive=*/false);
+                    {
+                        std::lock_guard<std::mutex> lock(stateMutex_);
+                        activeSnapshot_.reset();
+                    }
+                    isOptimized_.store(false);
+                    Log(LogLevel::Info, "Restoration complete. Resuming monitoring for next launch...");
+                    break;
+                } else if (waitResult == WAIT_OBJECT_0 + 2) {
+                    // User triggered manual re-scan / re-check while game is running
+                    Log(LogLevel::Info, "Re-verifying process optimization state...");
+                    // Re-apply affinity mask in case the game reset its own affinity
+                    DWORD_PTR currentAffinity = 0;
+                    DWORD_PTR sysAffinity = 0;
+                    if (::GetProcessAffinityMask(hProcess.Get(), &currentAffinity, &sysAffinity)) {
+                        DWORD_PTR targetAff = ComputeTargetAffinity(currentAffinity, sysAffinity);
+                        if (currentAffinity != targetAff) {
+                            ::SetProcessAffinityMask(hProcess.Get(), targetAff);
+                            Log(LogLevel::Success, "Re-applied affinity mask: " + AffinityMaskToString(targetAff));
+                        }
+                    }
+                } else {
+                    Log(LogLevel::Error, "Unexpected wait result in WaitForMultipleObjects: " + std::to_string(waitResult));
+                    break;
                 }
-                isOptimized_.store(false);
-                break;
-            } else if (waitResult == WAIT_OBJECT_0 + 1) {
-                // Target process terminated
-                Log(LogLevel::Info, "Target process (PID: " + std::to_string(pid) + ") terminated. Executing fault-tolerant restoration...");
-                RestoreProcessState(hProcess.Get(), snapshot, /*processIsAlive=*/false);
-                {
-                    std::lock_guard<std::mutex> lock(stateMutex_);
-                    activeSnapshot_.reset();
-                }
-                isOptimized_.store(false);
-                Log(LogLevel::Info, "Restoration complete. Resuming monitoring for next launch...");
-            } else {
-                Log(LogLevel::Error, "Unexpected wait result in WaitForMultipleObjects: " + std::to_string(waitResult));
-                break;
             }
         } else {
             Log(LogLevel::Warning, "Optimization phase failed. Retrying in next polling cycle.");
-            DWORD waitResult = ::WaitForSingleObject(stopEvent.Get(), static_cast<DWORD>(config_.pollInterval.count()));
+            HANDLE waitHandles[2] = { stopEvent.Get(), scanTriggerEvent_.Get() };
+            DWORD waitCount = scanTriggerEvent_.IsValid() ? 2 : 1;
+            DWORD waitResult = ::WaitForMultipleObjects(waitCount, waitHandles, FALSE, static_cast<DWORD>(config_.pollInterval.count()));
             if (waitResult == WAIT_OBJECT_0) {
                 break;
             }
@@ -185,6 +226,28 @@ void GameOptimizer::WorkerThread(std::stop_token stopToken) {
 // ============================================================================
 
 std::optional<DWORD> GameOptimizer::FindTargetProcessId(std::wstring_view processName) {
+    if (processName.empty()) {
+        return std::nullopt;
+    }
+
+    // Extract bare filename in case user passed or selected a full path (e.g. C:\Games\cs2.exe)
+    std::wstring target(processName);
+    size_t slashPos = target.find_last_of(L"\\/");
+    if (slashPos != std::wstring::npos) {
+        target = target.substr(slashPos + 1);
+    }
+
+    // Trim any trailing/leading whitespace
+    while (!target.empty() && iswspace(target.front())) target.erase(target.begin());
+    while (!target.empty() && iswspace(target.back())) target.pop_back();
+
+    if (target.empty()) {
+        return std::nullopt;
+    }
+
+    bool hasExeExt = (target.size() >= 4 && ::_wcsicmp(target.c_str() + target.size() - 4, L".exe") == 0);
+    std::wstring targetWithExe = hasExeExt ? target : (target + L".exe");
+
     UniqueHandle snapshot(::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
     if (!snapshot.IsValid()) {
         return std::nullopt;
@@ -197,9 +260,16 @@ std::optional<DWORD> GameOptimizer::FindTargetProcessId(std::wstring_view proces
         return std::nullopt;
     }
 
+    DWORD selfPid = ::GetCurrentProcessId();
+
     do {
-        // Case-insensitive comparison between executable file names
-        if (::_wcsicmp(entry.szExeFile, processName.data()) == 0) {
+        if (entry.th32ProcessID <= 4 || entry.th32ProcessID == selfPid) {
+            continue; // Skip system idle, system, and our own process
+        }
+
+        // Case-insensitive comparison against filename (with and without .exe)
+        if (::_wcsicmp(entry.szExeFile, target.c_str()) == 0 ||
+            ::_wcsicmp(entry.szExeFile, targetWithExe.c_str()) == 0) {
             return entry.th32ProcessID;
         }
     } while (::Process32NextW(snapshot.Get(), &entry));
@@ -274,9 +344,20 @@ bool GameOptimizer::OptimizeProcess(HANDLE hProcess, DWORD pid, ProcessStateSnap
         }
     }
 
+    // 5. Windows 1ms High-Resolution System Scheduler Timer (timeBeginPeriod)
+    if (config_.enableHighResolutionTimer) {
+        MMRESULT timerStatus = ::timeBeginPeriod(1);
+        if (timerStatus == TIMERR_NOERROR) {
+            snapshot.highResolutionTimerActive = true;
+            Log(LogLevel::Success, "Kernel Scheduler Timer: 1ms high-resolution timer engaged (timeBeginPeriod).");
+        } else {
+            Log(LogLevel::Warning, "Kernel Scheduler Timer: Failed to set 1ms timer period. Status: " + std::to_string(timerStatus));
+        }
+    }
+
     Log(LogLevel::Info, "--- Applying Process Optimizations ---");
 
-    // 5. Elevate Priority Class (HIGH_PRIORITY_CLASS; avoid REALTIME)
+    // 6. Elevate Priority Class (HIGH_PRIORITY_CLASS; avoid REALTIME)
     if (config_.targetPriorityClass != snapshot.originalPriorityClass) {
         if (::SetPriorityClass(hProcess, config_.targetPriorityClass)) {
             snapshot.priorityElevated = true;
@@ -289,7 +370,7 @@ bool GameOptimizer::OptimizeProcess(HANDLE hProcess, DWORD pid, ProcessStateSnap
         Log(LogLevel::Info, "Process Priority: Target already configured with requested priority class.");
     }
 
-    // 6. Calculate and Apply CPU Affinity Mask (Core Isolation)
+    // 7. Calculate and Apply CPU Affinity Mask (Core Isolation)
     DWORD_PTR targetAffinity = ComputeTargetAffinity(procAffinity, sysAffinity);
     if (targetAffinity != procAffinity) {
         if (::SetProcessAffinityMask(hProcess, targetAffinity)) {
@@ -353,6 +434,13 @@ void GameOptimizer::RestoreProcessState(HANDLE hProcess, ProcessStateSnapshot& s
         snapshot.mmcssActivated = false;
         Log(LogLevel::Info, "Reverted MMCSS scheduling characteristics.");
     }
+
+    // Revert High-Resolution Kernel Scheduler Timer
+    if (snapshot.highResolutionTimerActive) {
+        ::timeEndPeriod(1);
+        snapshot.highResolutionTimerActive = false;
+        Log(LogLevel::Info, "Restored default Windows kernel scheduler timer resolution.");
+    }
 }
 
 // ============================================================================
@@ -385,6 +473,16 @@ DWORD_PTR GameOptimizer::ComputeTargetAffinity([[maybe_unused]] DWORD_PTR curren
             Log(LogLevel::Warning, "Insufficient physical cores to isolate Core 0. Falling back to Logical CPU 0 isolation.");
             DWORD_PTR fallback = systemAffinity & ~static_cast<DWORD_PTR>(1);
             return (fallback != 0) ? fallback : systemAffinity;
+        }
+
+        case AffinityPolicy::IsolateECores: {
+            // Run exclusively on Performance Cores (P-Cores)
+            DWORD_PTR pCores = GetPerformanceCoresMask(systemAffinity);
+            if (pCores != 0 && pCores != systemAffinity) {
+                return pCores;
+            }
+            Log(LogLevel::Warning, "No distinct E-Cores detected on this CPU. Falling back to all cores.");
+            return systemAffinity;
         }
 
         case AffinityPolicy::CustomMask: {
@@ -422,6 +520,9 @@ DWORD_PTR GameOptimizer::GetPhysicalCore0Mask(DWORD_PTR systemAffinity) {
     DWORD offset = 0;
     while (offset < bufferSize) {
         auto* current = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data() + offset);
+        if (current->Size == 0) {
+            break; // Guard against potential infinite loop if size is zero
+        }
         if (current->Relationship == RelationProcessorCore) {
             // Examine group masks for this physical core
             for (WORD g = 0; g < current->Processor.GroupCount; ++g) {
@@ -437,6 +538,170 @@ DWORD_PTR GameOptimizer::GetPhysicalCore0Mask(DWORD_PTR systemAffinity) {
 
     // Default fallback: bit 0
     return static_cast<DWORD_PTR>(1);
+}
+
+DWORD_PTR GameOptimizer::GetPerformanceCoresMask(DWORD_PTR systemAffinity) {
+    DWORD bufferSize = 0;
+    ::GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bufferSize);
+    if (bufferSize == 0) {
+        return systemAffinity;
+    }
+
+    std::vector<uint8_t> buffer(bufferSize);
+    auto* pInfo = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data());
+    if (!::GetLogicalProcessorInformationEx(RelationProcessorCore, pInfo, &bufferSize)) {
+        return systemAffinity;
+    }
+
+    // Pass 1: Find highest EfficiencyClass (P-Cores)
+    BYTE maxEfficiencyClass = 0;
+    DWORD offset = 0;
+    while (offset < bufferSize) {
+        auto* current = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data() + offset);
+        if (current->Size == 0) break;
+        if (current->Relationship == RelationProcessorCore) {
+            if (current->Processor.EfficiencyClass > maxEfficiencyClass) {
+                maxEfficiencyClass = current->Processor.EfficiencyClass;
+            }
+        }
+        offset += current->Size;
+    }
+
+    // If all cores have the same efficiency class (e.g. 0), non-hybrid CPU
+    if (maxEfficiencyClass == 0) {
+        return systemAffinity;
+    }
+
+    // Pass 2: Accumulate mask of cores matching maxEfficiencyClass
+    DWORD_PTR pCoreMask = 0;
+    offset = 0;
+    while (offset < bufferSize) {
+        auto* current = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data() + offset);
+        if (current->Size == 0) break;
+        if (current->Relationship == RelationProcessorCore) {
+            if (current->Processor.EfficiencyClass == maxEfficiencyClass) {
+                for (WORD g = 0; g < current->Processor.GroupCount; ++g) {
+                    const auto& groupMask = current->Processor.GroupMask[g];
+                    if (groupMask.Group == 0) {
+                        pCoreMask |= static_cast<DWORD_PTR>(groupMask.Mask);
+                    }
+                }
+            }
+        }
+        offset += current->Size;
+    }
+
+    pCoreMask &= systemAffinity;
+    return (pCoreMask != 0) ? pCoreMask : systemAffinity;
+}
+
+bool GameOptimizer::HasHybridArchitecture() {
+    DWORD bufferSize = 0;
+    ::GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bufferSize);
+    if (bufferSize == 0) {
+        return false;
+    }
+
+    std::vector<uint8_t> buffer(bufferSize);
+    auto* pInfo = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data());
+    if (!::GetLogicalProcessorInformationEx(RelationProcessorCore, pInfo, &bufferSize)) {
+        return false;
+    }
+
+    BYTE minClass = 255;
+    BYTE maxClass = 0;
+    DWORD offset = 0;
+    while (offset < bufferSize) {
+        auto* current = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data() + offset);
+        if (current->Size == 0) break;
+        if (current->Relationship == RelationProcessorCore) {
+            BYTE eff = current->Processor.EfficiencyClass;
+            if (eff < minClass) minClass = eff;
+            if (eff > maxClass) maxClass = eff;
+        }
+        offset += current->Size;
+    }
+
+    return (maxClass > minClass);
+}
+
+std::optional<ProcessLiveTelemetry> GameOptimizer::GetLiveTelemetry() const {
+    if (!isOptimized_.load()) {
+        return std::nullopt;
+    }
+
+    DWORD pid = 0;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (!activeSnapshot_.has_value()) {
+            return std::nullopt;
+        }
+        pid = activeSnapshot_->processId;
+    }
+
+    UniqueHandle hProcess(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!hProcess.IsValid()) {
+        return std::nullopt;
+    }
+
+    ProcessLiveTelemetry telemetry{};
+
+    // 1. Working Set Memory
+    PROCESS_MEMORY_COUNTERS memCounters{};
+    memCounters.cb = sizeof(memCounters);
+    if (::K32GetProcessMemoryInfo(hProcess.Get(), &memCounters, sizeof(memCounters))) {
+        telemetry.workingSetBytes = memCounters.WorkingSetSize;
+    }
+
+    // 2. CPU Usage Calculation
+    FILETIME creationTime{}, exitTime{}, kernelTime{}, userTime{};
+    FILETIME sysIdleTime{}, sysKernelTime{}, sysUserTime{};
+    if (::GetProcessTimes(hProcess.Get(), &creationTime, &exitTime, &kernelTime, &userTime) &&
+        ::GetSystemTimes(&sysIdleTime, &sysKernelTime, &sysUserTime)) {
+        ULARGE_INTEGER procK, procU, sysK, sysU;
+        procK.LowPart = kernelTime.dwLowDateTime; procK.HighPart = kernelTime.dwHighDateTime;
+        procU.LowPart = userTime.dwLowDateTime;   procU.HighPart = userTime.dwHighDateTime;
+        sysK.LowPart  = sysKernelTime.dwLowDateTime; sysK.HighPart = sysKernelTime.dwHighDateTime;
+        sysU.LowPart  = sysUserTime.dwLowDateTime;   sysU.HighPart = sysUserTime.dwHighDateTime;
+
+        ULONGLONG curProc = procK.QuadPart + procU.QuadPart;
+        ULONGLONG curSys  = sysK.QuadPart + sysU.QuadPart;
+
+        if (prevSystemCpuTime_ != 0 && curSys > prevSystemCpuTime_) {
+            ULONGLONG procDiff = (curProc >= prevProcessCpuTime_) ? (curProc - prevProcessCpuTime_) : 0;
+            ULONGLONG sysDiff = curSys - prevSystemCpuTime_;
+
+            // Total system logical processors
+            SYSTEM_INFO sysInfo{};
+            ::GetSystemInfo(&sysInfo);
+            double totalProcessors = (sysInfo.dwNumberOfProcessors > 0) ? static_cast<double>(sysInfo.dwNumberOfProcessors) : 1.0;
+
+            telemetry.cpuUsagePercent = (static_cast<double>(procDiff) / static_cast<double>(sysDiff)) * 100.0 * totalProcessors;
+            if (telemetry.cpuUsagePercent < 0.0) telemetry.cpuUsagePercent = 0.0;
+            if (telemetry.cpuUsagePercent > 100.0) telemetry.cpuUsagePercent = 100.0;
+        }
+
+        prevProcessCpuTime_ = curProc;
+        prevSystemCpuTime_ = curSys;
+    }
+
+    // 3. Thread Count
+    UniqueHandle threadSnap(::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
+    if (threadSnap.IsValid()) {
+        THREADENTRY32 te{};
+        te.dwSize = sizeof(THREADENTRY32);
+        if (::Thread32First(threadSnap.Get(), &te)) {
+            uint32_t count = 0;
+            do {
+                if (te.th32OwnerProcessID == pid) {
+                    ++count;
+                }
+            } while (::Thread32Next(threadSnap.Get(), &te));
+            telemetry.threadCount = count;
+        }
+    }
+
+    return telemetry;
 }
 
 // ============================================================================

@@ -12,6 +12,8 @@
 #include <tlhelp32.h>
 #include <powrprof.h>
 #include <avrt.h>
+#include <timeapi.h>
+#include <psapi.h>
 
 #include <atomic>
 #include <chrono>
@@ -27,6 +29,8 @@
 // Required native Windows libraries
 #pragma comment(lib, "Powrprof.lib")
 #pragma comment(lib, "Avrt.lib")
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "psapi.lib")
 
 namespace Corelock {
 
@@ -188,6 +192,9 @@ enum class AffinityPolicy {
     /// Detect and mask out all logical threads of physical core 0 (SMT/HyperThreading aware)
     IsolatePhysicalCore0,
 
+    /// Isolate Intel Efficient Cores (E-Cores) to execute exclusively on Performance Cores (P-Cores)
+    IsolateECores,
+
     /// Apply explicit user-defined affinity bitmask
     CustomMask
 };
@@ -213,6 +220,9 @@ struct OptimizerConfig {
 
     /// Enable Multimedia Class Scheduler Service (MMCSS) scheduling
     bool enableMmcss{ true };
+
+    /// Request 1ms high-resolution Windows kernel scheduler timer (timeBeginPeriod)
+    bool enableHighResolutionTimer{ true };
 
     /// Polling frequency while waiting for target process creation
     std::chrono::milliseconds pollInterval{ 1000 };
@@ -240,6 +250,16 @@ struct ProcessStateSnapshot {
     bool affinityModified{ false };
     bool powerSchemeSwitched{ false };
     bool mmcssActivated{ false };
+    bool highResolutionTimerActive{ false };
+};
+
+/**
+ * @brief Live runtime metrics for the monitored process.
+ */
+struct ProcessLiveTelemetry {
+    double cpuUsagePercent{ 0.0 };
+    size_t workingSetBytes{ 0 };
+    uint32_t threadCount{ 0 };
 };
 
 // ============================================================================
@@ -275,6 +295,11 @@ public:
     void Stop();
 
     /**
+     * @brief Triggers an immediate process re-scan/check without waiting for the poll interval sleep.
+     */
+    void TriggerImmediateScan();
+
+    /**
      * @brief Checks if the optimizer worker thread is currently active.
      */
     [[nodiscard]] bool IsRunning() const noexcept;
@@ -288,6 +313,26 @@ public:
      * @brief Retrieves a copy of the active state snapshot, if any.
      */
     [[nodiscard]] std::optional<ProcessStateSnapshot> GetActiveSnapshot() const;
+
+    /**
+     * @brief Queries real-time performance telemetry (CPU%, Working Set, Threads) for target process.
+     */
+    [[nodiscard]] std::optional<ProcessLiveTelemetry> GetLiveTelemetry() const;
+
+    /**
+     * @brief Detects mask of all logical threads belonging to Physical Core 0.
+     */
+    static DWORD_PTR GetPhysicalCore0Mask(DWORD_PTR systemAffinity);
+
+    /**
+     * @brief Detects mask of Performance Cores (P-Cores) on Intel hybrid processors.
+     */
+    static DWORD_PTR GetPerformanceCoresMask(DWORD_PTR systemAffinity);
+
+    /**
+     * @brief Checks whether the host system features hybrid architecture (heterogeneous P/E cores).
+     */
+    static bool HasHybridArchitecture();
 
     /**
      * @brief Utility: Formats Win32 GetLastError() into a human-readable string.
@@ -325,8 +370,6 @@ private:
 
     DWORD_PTR ComputeTargetAffinity(DWORD_PTR currentAffinity, DWORD_PTR systemAffinity);
 
-    DWORD_PTR GetPhysicalCore0Mask(DWORD_PTR systemAffinity);
-
     void Log(LogLevel level, std::string_view message) const;
 
 private:
@@ -338,8 +381,15 @@ private:
     std::atomic<bool> isOptimized_{ false };
     std::optional<ProcessStateSnapshot> activeSnapshot_;
 
+    // Handle to trigger immediate wake-up for re-scan
+    UniqueHandle scanTriggerEvent_;
+
     // MMCSS task handle for thread priority boosting
     UniqueMmcssTask mmcssTask_;
+
+    // Telemetry tracking state
+    mutable ULONGLONG prevProcessCpuTime_{ 0 };
+    mutable ULONGLONG prevSystemCpuTime_{ 0 };
 };
 
 } // namespace Corelock

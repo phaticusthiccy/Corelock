@@ -2,6 +2,7 @@
 
 #include <dwmapi.h>
 #include <tchar.h>
+#include <commdlg.h>
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
@@ -26,8 +27,14 @@ GuiApp::GuiApp() {
     if (::GetProcessAffinityMask(::GetCurrentProcess(), &procAffinity, &sysAffinity)) {
         systemAffinityMask_ = sysAffinity;
     } else {
-        systemAffinityMask_ = (totalLogicalCores_ >= 64) ? ~0ULL : ((1ULL << totalLogicalCores_) - 1);
+        systemAffinityMask_ = (totalLogicalCores_ >= 64) ? ~static_cast<DWORD_PTR>(0) : ((static_cast<DWORD_PTR>(1) << totalLogicalCores_) - 1);
     }
+
+    // Query hardware topology
+    physicalCore0Mask_ = GameOptimizer::GetPhysicalCore0Mask(systemAffinityMask_);
+    performanceCoresMask_ = GameOptimizer::GetPerformanceCoresMask(systemAffinityMask_);
+    hasHybridArchitecture_ = GameOptimizer::HasHybridArchitecture();
+    customAffinityMask_ = systemAffinityMask_ & ~physicalCore0Mask_;
 
     // Default configuration
     config_.targetProcessName = L"game.exe";
@@ -35,16 +42,23 @@ GuiApp::GuiApp() {
     config_.affinityPolicy = AffinityPolicy::IsolateLogicalCpu0;
     config_.enableDynamicPowerPlan = true;
     config_.enableMmcss = true;
+    config_.enableHighResolutionTimer = true;
     config_.pollInterval = std::chrono::milliseconds(pollIntervalMs_);
     config_.logger = [this](LogLevel level, std::string_view msg) {
         AppendLog(level, msg);
     };
 
-    AppendLog(LogLevel::Info, "Corelock GUI Dashboard initialized.");
+    LoadConfigFromDisk();
+
+    AppendLog(LogLevel::Info, "Corelock Cyberpunk Dashboard initialized.");
     AppendLog(LogLevel::Info, "Detected " + std::to_string(totalLogicalCores_) + " system logical cores.");
+    if (hasHybridArchitecture_) {
+        AppendLog(LogLevel::Success, "Intel Hybrid Processor detected: P-Cores and E-Cores available for isolation.");
+    }
 }
 
 GuiApp::~GuiApp() {
+    SaveConfigToDisk();
     StopMonitoring();
     CleanupRenderTarget();
     CleanupDeviceD3D();
@@ -403,12 +417,19 @@ int GuiApp::Run(const std::wstring& initialTarget) {
 
         ImGui::Render();
         const float clearColor[4] = { 0.06f, 0.07f, 0.09f, 1.00f };
-        d3dDeviceContext_->OMSetRenderTargets(1, &mainRenderTargetView_, nullptr);
-        d3dDeviceContext_->ClearRenderTargetView(mainRenderTargetView_, clearColor);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        if (mainRenderTargetView_ != nullptr) {
+            d3dDeviceContext_->OMSetRenderTargets(1, &mainRenderTargetView_, nullptr);
+            d3dDeviceContext_->ClearRenderTargetView(mainRenderTargetView_, clearColor);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        }
 
         HRESULT hr = swapChain_->Present(1, 0); // VSync enabled for smooth UI
         swapChainOccluded_ = (hr == DXGI_STATUS_OCCLUDED);
+
+        // Power-saving: yield CPU when minimized or occluded
+        if (swapChainOccluded_ || ::IsIconic(hWnd_)) {
+            ::Sleep(20);
+        }
     }
 
     ImGui_ImplDX11_Shutdown();
@@ -537,10 +558,16 @@ void GuiApp::RenderControlPanel() {
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputText("##TargetProcess", targetProcessBuf_, sizeof(targetProcessBuf_));
 
-    // Process scanner & selector
-    if (ImGui::Button("Scan Running Processes", ImVec2(-1.0f, 26.0f))) {
+    // Dual action buttons: Scan running processes & Browse .exe on disk
+    float actionBtnWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+    if (ImGui::Button("Scan Processes", ImVec2(actionBtnWidth, 26.0f))) {
         RefreshProcessList();
         ImGui::OpenPopup("RunningProcessPopup");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Browse (.exe)...", ImVec2(actionBtnWidth, 26.0f))) {
+        BrowseForExecutable();
     }
 
     if (ImGui::BeginPopup("RunningProcessPopup")) {
@@ -549,14 +576,20 @@ void GuiApp::RenderControlPanel() {
         ImGui::InputTextWithHint("##Filter", "Search...", processFilterBuf_, sizeof(processFilterBuf_));
         ImGui::Separator();
 
+        // Optimize search filter: compute lowercase once outside the loop
+        std::string filterLower = processFilterBuf_;
+        std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), [](unsigned char c) {
+            return static_cast<char>(::tolower(c));
+        });
+
         ImGui::BeginChild("ProcessListScroll", ImVec2(320.0f, 200.0f));
         for (const auto& proc : runningProcesses_) {
             std::string narrowName = GameOptimizer::WideToNarrow(proc.exeName);
-            if (processFilterBuf_[0] != '\0') {
-                std::string filterLower = processFilterBuf_;
+            if (!filterLower.empty()) {
                 std::string nameLower = narrowName;
-                std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), ::tolower);
-                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), [](unsigned char c) {
+                    return static_cast<char>(::tolower(c));
+                });
                 if (nameLower.find(filterLower) == std::string::npos) {
                     continue;
                 }
@@ -565,6 +598,7 @@ void GuiApp::RenderControlPanel() {
             std::string label = narrowName + " (" + std::to_string(proc.pid) + ")";
             if (ImGui::Selectable(label.c_str())) {
                 ::strncpy_s(targetProcessBuf_, narrowName.c_str(), sizeof(targetProcessBuf_) - 1);
+                config_.targetProcessName = proc.exeName;
                 ImGui::CloseCurrentPopup();
             }
         }
@@ -584,7 +618,9 @@ void GuiApp::RenderControlPanel() {
     const char* policies[] = {
         "All Available Cores (No Isolation)",
         "Isolate Logical CPU 0 (Reserve for DPC/IRQs)",
-        "Isolate Physical Core 0 (SMT-Aware)"
+        "Isolate Physical Core 0 (SMT-Aware)",
+        "Isolate E-Cores (Intel P-Cores Only)",
+        "Custom Mask (Interactive Grid Map)"
     };
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::Combo("##AffinityPolicy", &selectedAffinityPolicyIndex_, policies, IM_ARRAYSIZE(policies));
@@ -603,10 +639,11 @@ void GuiApp::RenderControlPanel() {
     ImGui::Spacing();
     ImGui::Checkbox("Dynamic Windows Power Plan (High Performance)", &enablePowerPlan_);
     ImGui::Checkbox("Enable MMCSS 'Games' Scheduling Profile", &enableMmcss_);
+    ImGui::Checkbox("1ms High-Resolution Windows Timer (timeBeginPeriod)", &enableHighResolutionTimer_);
 
     ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::SliderInt("##PollInterval", &pollIntervalMs_, 200, 3000, "Polling Frequency: %d ms");
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -659,14 +696,41 @@ void GuiApp::RenderControlPanel() {
     ImGui::Spacing();
     // Quick Re-apply / Refresh Trigger
     if (isRunning) {
-        if (ImGui::Button("REFRESH / RE-SCAN PROCESS NOW", ImVec2(-1.0f, 26.0f))) {
-            AppendLog(LogLevel::Info, "Immediate process re-scan requested by user.");
+        if (ImGui::Button("REFRESH / RE-SCAN PROCESS NOW", ImVec2(-1.0f, 28.0f))) {
+            TriggerReScan();
         }
     }
 }
 
 void GuiApp::RenderCoreVisualizer() {
     ImGui::TextColored(ImVec4(0.00f, 0.85f, 0.95f, 1.00f), "CPU CORE AFFINITY MAP (HARDWARE TOPOLOGY)");
+    
+    // Topology summary badge
+    ImGui::TextColored(ImVec4(0.55f, 0.60f, 0.70f, 1.00f), 
+        "Topology: %d Logical Cores | Phys C0: 0x%llX%s",
+        totalLogicalCores_, static_cast<unsigned long long>(physicalCore0Mask_),
+        hasHybridArchitecture_ ? " | Intel Hybrid CPU" : "");
+    ImGui::Spacing();
+
+    // Quick preset buttons for Core Mask
+    float qbWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 3) / 4.0f;
+    if (ImGui::Button("All Cores", ImVec2(qbWidth, 22.0f))) {
+        selectedAffinityPolicyIndex_ = 0;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Isolate C0", ImVec2(qbWidth, 22.0f))) {
+        selectedAffinityPolicyIndex_ = 1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(hasHybridArchitecture_ ? "P-Cores" : "Phys C0", ImVec2(qbWidth, 22.0f))) {
+        selectedAffinityPolicyIndex_ = hasHybridArchitecture_ ? 3 : 2;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Invert Mask", ImVec2(qbWidth, 22.0f))) {
+        selectedAffinityPolicyIndex_ = 4;
+        customAffinityMask_ = (~customAffinityMask_) & systemAffinityMask_;
+    }
+
     ImGui::Spacing();
 
     int columns = 8;
@@ -686,16 +750,27 @@ void GuiApp::RenderCoreVisualizer() {
             ImGui::SameLine();
         }
 
-        bool isIsolated = false;
-        if (selectedAffinityPolicyIndex_ == 1 && i == 0) {
-            isIsolated = true; // Logical CPU 0 isolated
-        } else if (selectedAffinityPolicyIndex_ == 2 && (i == 0 || i == 1)) {
-            isIsolated = true; // Physical Core 0 SMT siblings isolated
+        DWORD_PTR coreBit = (static_cast<DWORD_PTR>(1) << i);
+        bool isEnabledForGame = false;
+
+        if (selectedAffinityPolicyIndex_ == 0) {
+            isEnabledForGame = true;
+        } else if (selectedAffinityPolicyIndex_ == 1) {
+            isEnabledForGame = (i != 0);
+        } else if (selectedAffinityPolicyIndex_ == 2) {
+            isEnabledForGame = ((physicalCore0Mask_ & coreBit) == 0);
+        } else if (selectedAffinityPolicyIndex_ == 3) {
+            isEnabledForGame = ((performanceCoresMask_ & coreBit) != 0);
+        } else if (selectedAffinityPolicyIndex_ == 4) {
+            isEnabledForGame = ((customAffinityMask_ & coreBit) != 0);
         }
+
+        bool isPhysicalCore0Thread = ((physicalCore0Mask_ & coreBit) != 0);
+        bool isPerformanceCore = (hasHybridArchitecture_ && (performanceCoresMask_ & coreBit) != 0);
 
         std::string coreLabel = "C" + std::to_string(i);
 
-        if (isIsolated) {
+        if (!isEnabledForGame) {
             // Radiant Amber for DPC / IRQ offloaded cores
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.45f, 0.00f, 0.85f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 0.55f, 0.10f, 1.00f));
@@ -707,15 +782,43 @@ void GuiApp::RenderCoreVisualizer() {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.00f, 0.40f, 0.35f, 1.00f));
         }
 
-        ImGui::Button(coreLabel.c_str(), ImVec2(itemSize, itemSize));
+        // Interactive tile: click to toggle in custom mask mode
+        if (ImGui::Button(coreLabel.c_str(), ImVec2(itemSize, itemSize))) {
+            if (selectedAffinityPolicyIndex_ != 4) {
+                // Initialize custom mask from current policy
+                DWORD_PTR curMask = systemAffinityMask_;
+                if (selectedAffinityPolicyIndex_ == 1) curMask &= ~static_cast<DWORD_PTR>(1);
+                else if (selectedAffinityPolicyIndex_ == 2) curMask &= ~physicalCore0Mask_;
+                else if (selectedAffinityPolicyIndex_ == 3) curMask = performanceCoresMask_;
+                customAffinityMask_ = curMask;
+                selectedAffinityPolicyIndex_ = 4;
+            }
+            customAffinityMask_ ^= coreBit;
+            if ((customAffinityMask_ & systemAffinityMask_) == 0) {
+                customAffinityMask_ |= coreBit; // Keep at least one core
+            }
+        }
+
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             ImGui::Text("Logical Processor Core %d", i);
-            if (isIsolated) {
+            if (isPhysicalCore0Thread) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Hardware: Physical Core 0 SMT Thread");
+            }
+            if (hasHybridArchitecture_) {
+                if (isPerformanceCore) {
+                    ImGui::TextColored(ImVec4(0.0f, 0.9f, 1.0f, 1.0f), "Architecture: Performance Core (P-Core)");
+                } else {
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Architecture: Efficient Core (E-Core)");
+                }
+            }
+            if (!isEnabledForGame) {
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "ROLE: OS DPC & Hardware Interrupts Only (Game Offloaded)");
             } else {
                 ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "ROLE: Dedicated Game Simulation & Render Thread");
             }
+            ImGui::Separator();
+            ImGui::TextDisabled("Click tile to toggle core in Custom Mask mode");
             ImGui::EndTooltip();
         }
 
@@ -724,9 +827,11 @@ void GuiApp::RenderCoreVisualizer() {
 
     ImGui::Spacing();
     // Legend
-    ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.00f, 1.00f), "[x] Isolated (DPC/IRQ Only)");
+    ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.00f, 1.00f), "[x] Isolated / Offloaded");
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.00f, 0.85f, 0.75f, 1.00f), "[O] Dedicated Game Core");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(Click tiles to edit)");
 }
 
 void GuiApp::RenderSnapshotCard() {
@@ -740,15 +845,51 @@ void GuiApp::RenderSnapshotCard() {
 
     if (isOptimized && snapshotOpt.has_value()) {
         const auto& snap = *snapshotOpt;
-        ImGui::Text("Optimized Target:   %s (PID: %d)", targetProcessBuf_, snap.processId);
-        ImGui::Text("Active Priority:    HIGH_PRIORITY_CLASS (Elevated)");
-        ImGui::Text("System Power Plan:  High Performance (Active)");
-        ImGui::Text("Anti-Cheat Safety:  100%% Out-of-Process (Safe)");
-        ImGui::Text("MMCSS Scheduler:    Enabled ('Games' Profile)");
+
+        // Session elapsed time
+        auto elapsedSec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - sessionStartTime_).count();
+        int hours = static_cast<int>(elapsedSec / 3600);
+        int minutes = static_cast<int>((elapsedSec % 3600) / 60);
+        int seconds = static_cast<int>(elapsedSec % 60);
+        char sessionDurationBuf[32];
+        std::snprintf(sessionDurationBuf, sizeof(sessionDurationBuf), "%02d:%02d:%02d", hours, minutes, seconds);
+
+        ImGui::Text("Optimized Target:   %s (PID: %lu)", targetProcessBuf_, snap.processId);
+        
+        const char* priorityName = "HIGH_PRIORITY_CLASS (Elevated)";
+        if (selectedPriorityIndex_ == 1) priorityName = "ABOVE_NORMAL_PRIORITY_CLASS";
+        else if (selectedPriorityIndex_ == 2) priorityName = "NORMAL_PRIORITY_CLASS";
+        ImGui::Text("Active Priority:    %s", priorityName);
+
+        ImGui::Text("System Power Plan:  %s", enablePowerPlan_ ? "High Performance (Active)" : "Standard (Unchanged)");
+        ImGui::Text("Scheduler Timer:    %s", enableHighResolutionTimer_ ? "1ms High-Resolution Active" : "Windows Default (15.6ms)");
+        ImGui::Text("Session Duration:   %s", sessionDurationBuf);
+
+        // Live Real-Time Telemetry
+        auto liveTel = optimizer_->GetLiveTelemetry();
+        if (liveTel.has_value()) {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Target CPU Usage:   %.1f%%", liveTel->cpuUsagePercent);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(Across game threads)");
+
+            float cpuFraction = static_cast<float>(liveTel->cpuUsagePercent / 100.0);
+            if (cpuFraction > 1.0f) cpuFraction = 1.0f;
+            ImGui::ProgressBar(cpuFraction, ImVec2(-1.0f, 14.0f), "");
+
+            double ramMB = static_cast<double>(liveTel->workingSetBytes) / (1024.0 * 1024.0);
+            ImGui::Text("Target Working Set: %.1f MB RAM", ramMB);
+            ImGui::Text("Thread Count:       %u active threads", liveTel->threadCount);
+        }
     } else {
-        ImGui::TextDisabled("No game currently active. Standing by for target launch...");
-        ImGui::Text("Target Filter:      %s", targetProcessBuf_);
-        ImGui::Text("Safety Verification: Completely Out-of-Process (0 Memory/DLL Access)");
+        ImGui::TextDisabled("No target process currently running. Standing by for launch...");
+        ImGui::Text("Configured Target:  %s", targetProcessBuf_);
+        ImGui::Text("Scheduler Timer:    %s", enableHighResolutionTimer_ ? "1ms Ready" : "Default");
+        ImGui::Text("Anti-Cheat Safety:  100%% Out-of-Process, 0 Memory/DLL Modification");
     }
 }
 
@@ -817,8 +958,12 @@ void GuiApp::StartMonitoring() {
         case 0: config_.affinityPolicy = AffinityPolicy::AllCores; break;
         case 1: config_.affinityPolicy = AffinityPolicy::IsolateLogicalCpu0; break;
         case 2: config_.affinityPolicy = AffinityPolicy::IsolatePhysicalCore0; break;
+        case 3: config_.affinityPolicy = AffinityPolicy::IsolateECores; break;
+        case 4: config_.affinityPolicy = AffinityPolicy::CustomMask; break;
         default: config_.affinityPolicy = AffinityPolicy::IsolateLogicalCpu0; break;
     }
+
+    config_.customAffinityMask = customAffinityMask_;
 
     switch (selectedPriorityIndex_) {
         case 0: config_.targetPriorityClass = HIGH_PRIORITY_CLASS; break;
@@ -829,6 +974,7 @@ void GuiApp::StartMonitoring() {
 
     config_.enableDynamicPowerPlan = enablePowerPlan_;
     config_.enableMmcss = enableMmcss_;
+    config_.enableHighResolutionTimer = enableHighResolutionTimer_;
     config_.pollInterval = std::chrono::milliseconds(pollIntervalMs_);
 
     optimizer_ = std::make_unique<GameOptimizer>(config_);
@@ -841,6 +987,95 @@ void GuiApp::StopMonitoring() {
         optimizer_->Stop();
         optimizer_.reset();
     }
+}
+
+void GuiApp::TriggerReScan() {
+    if (optimizer_ != nullptr) {
+        optimizer_->TriggerImmediateScan();
+    }
+    AppendLog(LogLevel::Info, "Immediate process re-scan requested by user.");
+}
+
+void GuiApp::BrowseForExecutable() {
+    wchar_t filename[MAX_PATH] = { 0 };
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(OPENFILENAMEW);
+    ofn.hwndOwner = hWnd_;
+    ofn.lpstrFilter = L"Executable Files (*.exe)\0*.exe\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+
+    if (::GetOpenFileNameW(&ofn)) {
+        std::wstring wpath(filename);
+        size_t slash = wpath.find_last_of(L"\\/");
+        std::wstring bareName = (slash != std::wstring::npos) ? wpath.substr(slash + 1) : wpath;
+        std::string narrow = GameOptimizer::WideToNarrow(bareName);
+        ::strncpy_s(targetProcessBuf_, narrow.c_str(), sizeof(targetProcessBuf_) - 1);
+        config_.targetProcessName = bareName;
+        AppendLog(LogLevel::Info, "Target executable selected via file dialog: '" + narrow + "'");
+    }
+}
+
+void GuiApp::LoadConfigFromDisk() {
+    wchar_t exePath[MAX_PATH]{ 0 };
+    ::GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring iniPath(exePath);
+    size_t slash = iniPath.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        iniPath = iniPath.substr(0, slash + 1) + L"corelock.ini";
+    } else {
+        iniPath = L".\\corelock.ini";
+    }
+
+    wchar_t targetBuf[128]{ 0 };
+    ::GetPrivateProfileStringW(L"Corelock", L"TargetProcess", L"game.exe", targetBuf, 128, iniPath.c_str());
+    if (targetBuf[0] != L'\0') {
+        std::string narrow = GameOptimizer::WideToNarrow(targetBuf);
+        ::strncpy_s(targetProcessBuf_, narrow.c_str(), sizeof(targetProcessBuf_) - 1);
+        config_.targetProcessName = targetBuf;
+    }
+
+    selectedAffinityPolicyIndex_ = ::GetPrivateProfileIntW(L"Corelock", L"AffinityPolicy", 1, iniPath.c_str());
+    selectedPriorityIndex_ = ::GetPrivateProfileIntW(L"Corelock", L"PriorityIndex", 0, iniPath.c_str());
+    enablePowerPlan_ = (::GetPrivateProfileIntW(L"Corelock", L"PowerPlan", 1, iniPath.c_str()) != 0);
+    enableMmcss_ = (::GetPrivateProfileIntW(L"Corelock", L"Mmcss", 1, iniPath.c_str()) != 0);
+    enableHighResolutionTimer_ = (::GetPrivateProfileIntW(L"Corelock", L"HighResTimer", 1, iniPath.c_str()) != 0);
+    pollIntervalMs_ = ::GetPrivateProfileIntW(L"Corelock", L"PollInterval", 800, iniPath.c_str());
+
+    wchar_t maskBuf[64]{ 0 };
+    ::GetPrivateProfileStringW(L"Corelock", L"CustomMask", L"0", maskBuf, 64, iniPath.c_str());
+    if (maskBuf[0] != L'\0') {
+        DWORD_PTR loadedMask = _wcstoui64(maskBuf, nullptr, 16);
+        if (loadedMask != 0) {
+            customAffinityMask_ = loadedMask & systemAffinityMask_;
+        }
+    }
+}
+
+void GuiApp::SaveConfigToDisk() {
+    wchar_t exePath[MAX_PATH]{ 0 };
+    ::GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring iniPath(exePath);
+    size_t slash = iniPath.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        iniPath = iniPath.substr(0, slash + 1) + L"corelock.ini";
+    } else {
+        iniPath = L".\\corelock.ini";
+    }
+
+    std::wstring targetWide = GameOptimizer::NarrowToWide(targetProcessBuf_);
+    ::WritePrivateProfileStringW(L"Corelock", L"TargetProcess", targetWide.c_str(), iniPath.c_str());
+    ::WritePrivateProfileStringW(L"Corelock", L"AffinityPolicy", std::to_wstring(selectedAffinityPolicyIndex_).c_str(), iniPath.c_str());
+    ::WritePrivateProfileStringW(L"Corelock", L"PriorityIndex", std::to_wstring(selectedPriorityIndex_).c_str(), iniPath.c_str());
+    ::WritePrivateProfileStringW(L"Corelock", L"PowerPlan", enablePowerPlan_ ? L"1" : L"0", iniPath.c_str());
+    ::WritePrivateProfileStringW(L"Corelock", L"Mmcss", enableMmcss_ ? L"1" : L"0", iniPath.c_str());
+    ::WritePrivateProfileStringW(L"Corelock", L"HighResTimer", enableHighResolutionTimer_ ? L"1" : L"0", iniPath.c_str());
+    ::WritePrivateProfileStringW(L"Corelock", L"PollInterval", std::to_wstring(pollIntervalMs_).c_str(), iniPath.c_str());
+
+    std::wostringstream maskSs;
+    maskSs << std::hex << customAffinityMask_;
+    ::WritePrivateProfileStringW(L"Corelock", L"CustomMask", maskSs.str().c_str(), iniPath.c_str());
 }
 
 void GuiApp::AppendLog(LogLevel level, std::string_view msg) {

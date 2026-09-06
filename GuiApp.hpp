@@ -84,6 +84,11 @@ private:
 
     void StartMonitoring();
     void StopMonitoring();
+    void TriggerReScan();
+
+    void BrowseForExecutable();
+    void LoadConfigFromDisk();
+    void SaveConfigToDisk();
 
     void AppendLog(LogLevel level, std::string_view msg);
 
@@ -107,12 +112,16 @@ private:
     int selectedPriorityIndex_{ 0 };       // Default: HIGH_PRIORITY_CLASS
     bool enablePowerPlan_{ true };
     bool enableMmcss_{ true };
+    bool enableHighResolutionTimer_{ true };
     int pollIntervalMs_{ 800 };
 
     // CPU Topology information
     int totalLogicalCores_{ 0 };
     DWORD_PTR systemAffinityMask_{ 0 };
     DWORD_PTR physicalCore0Mask_{ 1 };
+    DWORD_PTR performanceCoresMask_{ 0 };
+    bool hasHybridArchitecture_{ false };
+    DWORD_PTR customAffinityMask_{ 0 };
 
     // Running process picker
     std::vector<RunningProcessItem> runningProcesses_;
